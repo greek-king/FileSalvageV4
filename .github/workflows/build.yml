@@ -1,0 +1,89 @@
+name: Build iOS IPA (Unsigned)
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Select Xcode 16
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app
+          xcodebuild -version
+
+      - name: Install tools
+        run: |
+          brew install xcodegen
+          brew install ldid
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build .app for real device (unsigned)
+        run: |
+          xcodebuild \
+            -project FileSalvage.xcodeproj \
+            -scheme FileSalvage \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath $RUNNER_TEMP/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build \
+            2>&1 | tee build.log
+          if grep -q "BUILD SUCCEEDED" build.log; then
+            echo "✅ Build succeeded"
+          else
+            echo "❌ Build failed"
+            cat build.log
+            exit 1
+          fi
+
+      - name: Find .app path
+        run: |
+          APP=$(find $RUNNER_TEMP/DerivedData -name "FileSalvage.app" | grep -v simulator | head -1)
+          if [ -z "$APP" ]; then
+            APP=$(find $RUNNER_TEMP/DerivedData -name "FileSalvage.app" | head -1)
+          fi
+          echo "APP_PATH=$APP" >> $GITHUB_ENV
+          echo "Found app at: $APP"
+
+      - name: Sign with ldid (enables sideloading via AltStore/Sideloadly)
+        run: |
+          ldid -S "$APP_PATH/FileSalvage"
+          echo "✅ Signed with ldid"
+
+      - name: Package into IPA
+        run: |
+          mkdir -p $RUNNER_TEMP/Payload
+          cp -r "$APP_PATH" $RUNNER_TEMP/Payload/FileSalvage.app
+          cd $RUNNER_TEMP
+          zip -r FileSalvage.ipa Payload/
+          echo "✅ IPA size: $(du -sh FileSalvage.ipa)"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: FileSalvage-IPA
+          path: ${{ runner.temp }}/FileSalvage.ipa
+          retention-days: 30
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: build-log
+          path: build.log
+          retention-days: 7
